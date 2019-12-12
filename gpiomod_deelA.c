@@ -22,12 +22,22 @@
 #include <linux/init.h>
 #include <linux/gpio.h>
 
+#include <linux/interrupt.h>
+
 // Variabelen die de pinnummers bijhouden...
 int pinX = 16;
 int pinY = 18;
 
 static struct timer_list blink_timer;
 static long data=0;
+
+/* Define GPIOs for BUTTONS */
+static struct gpio buttons[] = {
+		{ 17, GPIOF_IN, "BUTTON 1" }
+};
+
+/* Array voor het opslaan van IRQ numbers voor de button(s) */
+static int button_irqs[] = { -1 };
 
 /*
  * The module commandline arguments ...
@@ -78,6 +88,21 @@ static int clargmod_init(void)
 
 	return 0;
 }
+
+/*
+ * The interrupt service routine called on button presses
+ */
+static irqreturn_t button_isr(int irq, void *data)
+{
+	if(irq == button_irqs[0]) {
+		// Niewe flank
+		printk(KERN_INFO "flank detected");	
+	}
+
+	return IRQ_HANDLED;
+}
+
+
 /*
  * Timer function called periodically
  */
@@ -103,9 +128,11 @@ static int __init gpiomod_init(void)
 	clargmod_init();
 
 
+	int retButtons = 0;
 	int ret1 = 0;
-	int ret2 = 0;
+	int ret2= 0;
 
+	/* Register relais GPIO's (dus de pinnen beschreven in de array ioNummers)*/
 	printk(KERN_INFO "%s\n", __func__);
 
 	// register, turn off 
@@ -123,16 +150,45 @@ static int __init gpiomod_init(void)
 	return ret2;
 	}
 
+
+	// register BUTTON gpios
+	retButtons = gpio_request_array(buttons, ARRAY_SIZE(buttons));
+
+	if (retButtons) {
+		printk(KERN_ERR "Unable to request GPIOs for BUTTONs: %d\n", retButtons);
+	}
+
+	printk(KERN_INFO "Current button1 value: %d\n", gpio_get_value(buttons[0].gpio));
+
+	retButtons = gpio_to_irq(buttons[0].gpio);
+
+	if(retButtons < 0) {
+		printk(KERN_ERR "Unable to request IRQ: %d\n", retButtons);
+	}
+
+	button_irqs[0] = retButtons;
+
+	printk(KERN_INFO "Successfully requested BUTTON1 IRQ # %d\n", button_irqs[0]);
+
+	retButtons = request_irq(button_irqs[0], button_isr, IRQF_TRIGGER_RISING /* | IRQF_DISABLED */, "gpiomod#button1", NULL);
+
+	if(retButtons) {
+		printk(KERN_ERR "Unable to request IRQ: %d\n", retButtons);
+	}
+
+
+
+
 	/* init timer, add timer function */
 	//init_timer(&blink_timer);
 	 timer_setup(&blink_timer, blink_timer_func, 0);
 
 	// makes the LED toggle for "ioToggleSpeed" sec
 	blink_timer.function = blink_timer_func;
-	blink_timer.expires = jiffies + (ioToggleSpeed*HZ); 		 
+	blink_timer.expires = jiffies + (ioToggleSpeed/10*HZ); 		 
 	add_timer(&blink_timer);
 
-	return ret1;
+	return retButtons;
 }
 
 /*
@@ -152,7 +208,11 @@ static void __exit gpiomod_exit(void)
 	// unregister GPIO 
 	gpio_free(pinX);
 	gpio_free(pinY);
+	gpio_free_array(buttons, ARRAY_SIZE(buttons));
 
+
+	// free irqs
+	free_irq(button_irqs[0], NULL);
 }
 
 MODULE_LICENSE("GPL");
