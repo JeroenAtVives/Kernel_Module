@@ -72,12 +72,12 @@ static int clargmod_init(void)
 
 	// Zit er niets op index 0 dan zal er ook niets zitten op index 1 dus krijgen pinX en pinY default waarden.
 	if(ioNummers[0] == -1){
-		pinX = 16;
+		pinX = 23;
 	}else{
 		pinX = ioNummers[0];
 	}
 	if(ioNummers[1] == -1){
-		pinY = 18;
+		pinY = 24;
 	}else{
 		pinY = ioNummers[1];
 	}
