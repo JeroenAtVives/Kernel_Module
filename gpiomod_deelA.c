@@ -28,6 +28,12 @@
 int pinX = 16;
 int pinY = 18;
 
+// Variabele voor input IO
+int pinInput = -1;
+
+// Variabele voor het aantal stijgende flanken...
+int risingEdges = 0;
+
 static struct timer_list blink_timer;
 static long data=0;
 
@@ -44,13 +50,15 @@ static int button_irqs[] = { -1 };
  */
 static int 			 ioToggleSpeed	= 1;
 static int 			 ioNummers[2] 	= { -1, -1 };
+static int			 input = -1;
 static int 			 arr_argc 		= 0;
 
 module_param(ioToggleSpeed, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(ioToggleSpeed, "An integer that describes how fast the IO toggles");
 module_param_array(ioNummers, int, &arr_argc, 0000);
 MODULE_PARM_DESC(ioNummers, "An array of integers met de IO-nummers");
-
+module_param(input, int,S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(input, "Parameter die aangeeft welke IO als input wordt bekeken");
 /*
  * Clargmod init function
  */
@@ -58,8 +66,10 @@ static int clargmod_init(void)
 {
 	int i;
 
+	// Kernel messages...
 	printk(KERN_INFO "%s\n=============\n", __func__); // __func__ is de naam van de "enclosing function", hier clargmod_init.
 	printk(KERN_INFO "ioToggleSpeed is an integer: %d\n", ioToggleSpeed);
+	printk(KERN_INFO "input is an integer: %d\n", input);
 
 	// Inhoud van de array met ioNummers tonen...
 	for (i = 0; i < (sizeof ioNummers / sizeof (int)); i++)
@@ -70,7 +80,7 @@ static int clargmod_init(void)
 	// Controle op de inhoud van de array met ioNummers. Op basis van die inhoud worden de pinnen pinX en pinY juist gezet. 
 	// Want het kan zijn dat de array leeg was, dat er 1 nummer in zat of 2 nummers in zaten.
 
-	// Zit er niets op index 0 dan zal er ook niets zitten op index 1 dus krijgen pinX en pinY default waarden.
+
 	if(ioNummers[0] == -1){
 		pinX = 23;
 	}else{
@@ -81,8 +91,24 @@ static int clargmod_init(void)
 	}else{
 		pinY = ioNummers[1];
 	}
+
+	// De input pin opvragen...
+	if(input == -1){
+		pinInput = 20;
+	}else{
+		pinInput = input;
+	}
+
+	// De struct correct invullen zodat we weten welke pin als button geïnterpreteerd moet worden...
+	buttons[0].gpio = pinInput;
+	buttons[0].flags = GPIOF_IN;
+	buttons[0].label = "BUTTON 1";
+
+	// Kernel messages...
 	printk(KERN_INFO "pinX : %d\n",pinX);
-	printk(KERN_INFO "pinY : %d\n",pinY);	
+	printk(KERN_INFO "pinY : %d\n",pinY);
+	printk(KERN_INFO "input pin : %d\n",pinInput);	
+
 	// Hoeveel argumenten zaten er in de array ioNummers...
 	printk(KERN_INFO "got %d arguments for ioNummers.\n", arr_argc);
 
@@ -96,6 +122,8 @@ static irqreturn_t button_isr(int irq, void *data)
 {
 	if(irq == button_irqs[0]) {
 		// Niewe flank
+		risingEdges++;
+		printk(KERN_INFO "Aantal stijgende flanken %d.\n",risingEdges);
 		printk(KERN_INFO "flank detected");	
 	}
 
@@ -110,6 +138,7 @@ static void blink_timer_func(struct timer_list* t)
 {
 	printk(KERN_INFO "%s\n", __func__);
 
+	// PinX en PinY setten...
 	gpio_set_value(pinX, data);
 	gpio_set_value(pinY, data);
 	data=!data; 
@@ -151,7 +180,7 @@ static int __init gpiomod_init(void)
 	}
 
 
-	// register BUTTON gpios
+	/* register BUTTON gpios */
 	retButtons = gpio_request_array(buttons, ARRAY_SIZE(buttons));
 
 	if (retButtons) {
@@ -183,7 +212,7 @@ static int __init gpiomod_init(void)
 	//init_timer(&blink_timer);
 	 timer_setup(&blink_timer, blink_timer_func, 0);
 
-	// makes the LED toggle for "ioToggleSpeed" sec
+	// makes the LED toggle depending on "ioToggleSpeed"
 	blink_timer.function = blink_timer_func;
 	blink_timer.expires = jiffies + (ioToggleSpeed/10*HZ); 		 
 	add_timer(&blink_timer);
