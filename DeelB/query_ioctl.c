@@ -1,0 +1,343 @@
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/version.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/device.h>
+#include <linux/errno.h>
+#include <asm/uaccess.h>
+#include <linux/uaccess.h> 
+#include <linux/sched.h>
+#include <linux/timer.h>
+#include <linux/init.h>
+#include <linux/gpio.h>
+#include "query_ioctl.h"
+#include <linux/interrupt.h>
+
+// Variabelen die de pinnummers bijhouden...
+int pinX = 16;
+int pinY = 18;
+
+// Variabele voor input IO
+int pinInput = -1;
+
+// Variabele voor het aantal stijgende flanken...
+int risingEdges = 0;
+
+static struct timer_list blink_timer;
+static long data=0;
+
+/* Define GPIOs for BUTTONS */
+static struct gpio buttons[] = {
+		{ 17, GPIOF_IN, "BUTTON 1" }
+};
+
+/* Array voor het opslaan van IRQ numbers voor de button(s) */
+static int button_irqs[] = { -1 };
+
+/*
+ * The module commandline arguments ...
+ */
+static int 			 ioToggleSpeed	= 1;
+static int 			 ioNummers[2] 	= { -1, -1 };
+static int			 input = -1;
+static int 			 arr_argc 		= 0;
+
+module_param(ioToggleSpeed, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(ioToggleSpeed, "An integer that describes how fast the IO toggles");
+module_param_array(ioNummers, int, &arr_argc, 0000);
+MODULE_PARM_DESC(ioNummers, "An array of integers met de IO-nummers");
+module_param(input, int,S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(input, "Parameter die aangeeft welke IO als input wordt bekeken");
+
+#define FIRST_MINOR 0
+#define MINOR_CNT 1
+ 
+static dev_t dev;
+static struct cdev c_dev;
+static struct class *cl;
+static int status = 1, dignity = 3, ego = 5;
+ 
+static int my_open(struct inode *i, struct file *f)
+{
+    return 0;
+}
+static int my_close(struct inode *i, struct file *f)
+{
+    return 0;
+}
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,35))
+static int my_ioctl(struct inode *i, struct file *f, unsigned int cmd, unsigned long arg)
+#else
+static long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
+#endif
+{
+    query_arg_t q;
+ 
+    switch (cmd)
+    {
+        case QUERY_GET_VARIABLES:
+            q.risingEdges = risingEdges;
+            q.ioToggleSpeed = ioToggleSpeed;
+            //q.ego = ego;
+            if (copy_to_user((query_arg_t *)arg, &q, sizeof(query_arg_t)))
+            {
+                return -EACCES;
+            }
+            break;
+        case QUERY_CLR_VARIABLES:
+            risingEdges = 0;
+            ioToggleSpeed = 0;
+            //ego = 0;
+            break;
+        case QUERY_SET_VARIABLES:
+            if (copy_from_user(&q, (query_arg_t *)arg, sizeof(query_arg_t)))
+            {
+                return -EACCES;
+            }
+            risingEdges = q.risingEdges;
+            ioToggleSpeed = q.ioToggleSpeed;
+            //ego = q.ego;
+            break;
+        default:
+            return -EINVAL;
+    }
+ 
+    return 0;
+}
+
+/*
+ * Clargmod init function
+ */
+static int clargmod_init(void)
+{
+	int i;
+
+	// Kernel messages...
+	printk(KERN_INFO "%s\n=============\n", __func__); // __func__ is de naam van de "enclosing function", hier clargmod_init.
+	printk(KERN_INFO "ioToggleSpeed is an integer: %d\n", ioToggleSpeed);
+	printk(KERN_INFO "input is an integer: %d\n", input);
+
+	// Inhoud van de array met ioNummers tonen...
+	for (i = 0; i < (sizeof ioNummers / sizeof (int)); i++)
+	{
+		printk(KERN_INFO "ioNummers[%d] = %d\n", i, ioNummers[i]);
+	}
+
+	// Controle op de inhoud van de array met ioNummers. Op basis van die inhoud worden de pinnen pinX en pinY juist gezet. 
+	// Want het kan zijn dat de array leeg was, dat er 1 nummer in zat of 2 nummers in zaten.
+
+
+	if(ioNummers[0] == -1){
+		pinX = 23;
+	}else{
+		pinX = ioNummers[0];
+	}
+	if(ioNummers[1] == -1){
+		pinY = 24;
+	}else{
+		pinY = ioNummers[1];
+	}
+
+	// De input pin opvragen...
+	if(input == -1){
+		pinInput = 20;
+	}else{
+		pinInput = input;
+	}
+
+	// De struct correct invullen zodat we weten welke pin als button geïnterpreteerd moet worden...
+	buttons[0].gpio = pinInput;
+	buttons[0].flags = GPIOF_IN;
+	buttons[0].label = "BUTTON 1";
+
+	// Kernel messages...
+	printk(KERN_INFO "pinX : %d\n",pinX);
+	printk(KERN_INFO "pinY : %d\n",pinY);
+	printk(KERN_INFO "input pin : %d\n",pinInput);	
+
+	// Hoeveel argumenten zaten er in de array ioNummers...
+	printk(KERN_INFO "got %d arguments for ioNummers.\n", arr_argc);
+
+	return 0;
+}
+
+/*
+ * The interrupt service routine called on button presses
+ */
+static irqreturn_t button_isr(int irq, void *data)
+{
+	if(irq == button_irqs[0]) {
+		// Niewe flank
+		risingEdges++;
+		printk(KERN_INFO "Aantal stijgende flanken %d.\n",risingEdges);
+		printk(KERN_INFO "flank detected");	
+	}
+
+	return IRQ_HANDLED;
+}
+
+
+/*
+ * Timer function called periodically
+ */
+static void blink_timer_func(struct timer_list* t)
+{
+	printk(KERN_INFO "%s\n", __func__);
+
+	// PinX en PinY setten...
+	gpio_set_value(pinX, data);
+	gpio_set_value(pinY, data);
+	data=!data; 
+	
+	/* schedule next execution */
+	blink_timer.expires = jiffies + (ioToggleSpeed*HZ); 		
+	add_timer(&blink_timer);
+}
+ 
+static struct file_operations query_fops =
+{
+    .owner = THIS_MODULE,
+    .open = my_open,
+    .release = my_close,
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,35))
+    .ioctl = my_ioctl
+#else
+    .unlocked_ioctl = my_ioctl
+#endif
+};
+ 
+static int __init query_ioctl_init(void)
+{
+
+    // Functie oproepen die zich bezig houdt met het verwerken van de parameters...
+	clargmod_init();
+
+
+	int retButtons = 0;
+	int ret1 = 0;
+	int ret2= 0;
+
+	/* Register relais GPIO's (dus de pinnen beschreven in de array ioNummers)*/
+	printk(KERN_INFO "%s\n", __func__);
+
+	// register, turn off 
+	ret1 = gpio_request_one(pinX, GPIOF_OUT_INIT_LOW, "pinX");
+	ret2 = gpio_request_one(pinY, GPIOF_OUT_INIT_LOW, "pinY");
+
+
+	if (ret1) {
+		printk(KERN_ERR "Unable to request GPIOs: %d\n", ret1);
+		return ret1;
+	}
+
+	if (ret2) {
+	printk(KERN_ERR "Unable to request GPIOs: %d\n", ret2);
+	return ret2;
+	}
+
+
+	/* register BUTTON gpios */
+	retButtons = gpio_request_array(buttons, ARRAY_SIZE(buttons));
+
+	if (retButtons) {
+		printk(KERN_ERR "Unable to request GPIOs for BUTTONs: %d\n", retButtons);
+	}
+
+	printk(KERN_INFO "Current button1 value: %d\n", gpio_get_value(buttons[0].gpio));
+
+	retButtons = gpio_to_irq(buttons[0].gpio);
+
+	if(retButtons < 0) {
+		printk(KERN_ERR "Unable to request IRQ: %d\n", retButtons);
+	}
+
+	button_irqs[0] = retButtons;
+
+	printk(KERN_INFO "Successfully requested BUTTON1 IRQ # %d\n", button_irqs[0]);
+
+	retButtons = request_irq(button_irqs[0], button_isr, IRQF_TRIGGER_RISING /* | IRQF_DISABLED */, "gpiomod#button1", NULL);
+
+	if(retButtons) {
+		printk(KERN_ERR "Unable to request IRQ: %d\n", retButtons);
+	}
+
+
+
+
+	/* init timer, add timer function */
+	//init_timer(&blink_timer);
+	 timer_setup(&blink_timer, blink_timer_func, 0);
+
+	// makes the LED toggle depending on "ioToggleSpeed"
+	blink_timer.function = blink_timer_func;
+	blink_timer.expires = jiffies + (ioToggleSpeed/10*HZ); 		 
+	add_timer(&blink_timer);
+
+    int ret;
+    struct device *dev_ret;
+ 
+ 
+    if ((ret = alloc_chrdev_region(&dev, FIRST_MINOR, MINOR_CNT, "query_ioctl")) < 0)
+    {
+        return ret;
+    }
+ 
+    cdev_init(&c_dev, &query_fops);
+ 
+    if ((ret = cdev_add(&c_dev, dev, MINOR_CNT)) < 0)
+    {
+        return ret;
+    }
+     
+    if (IS_ERR(cl = class_create(THIS_MODULE, "char")))
+    {
+        cdev_del(&c_dev);
+        unregister_chrdev_region(dev, MINOR_CNT);
+        return PTR_ERR(cl);
+    }
+    if (IS_ERR(dev_ret = device_create(cl, NULL, dev, NULL, "query")))
+    {
+        class_destroy(cl);
+        cdev_del(&c_dev);
+        unregister_chrdev_region(dev, MINOR_CNT);
+        return PTR_ERR(dev_ret);
+    }
+
+    
+ 
+    return 0;
+}
+ 
+static void __exit query_ioctl_exit(void)
+{
+    device_destroy(cl, dev);
+    class_destroy(cl);
+    cdev_del(&c_dev);
+    unregister_chrdev_region(dev, MINOR_CNT);
+
+    printk(KERN_INFO "%s\n", __func__);
+
+	// deactivate timer if running
+	del_timer_sync(&blink_timer);
+
+	// Zet de IOpinnen terug laag...
+	gpio_set_value(pinX, 0); 
+	gpio_set_value(pinY, 0); 	
+	
+	// unregister GPIO 
+	gpio_free(pinX);
+	gpio_free(pinY);
+	gpio_free_array(buttons, ARRAY_SIZE(buttons));
+
+
+	// free irqs
+	free_irq(button_irqs[0], NULL);
+}
+ 
+module_init(query_ioctl_init);
+module_exit(query_ioctl_exit);
+ 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Anil Kumar Pugalia <email_at_sarika-pugs_dot_com>");
+MODULE_DESCRIPTION("Query ioctl() Char Driver");
